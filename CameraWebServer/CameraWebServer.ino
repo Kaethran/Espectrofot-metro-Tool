@@ -38,6 +38,9 @@
 // ===========================
 const char *ssid = "Totalplay-2.4G-17d0";
 const char *password = "Dwbw5bWC8bUsLDsu";
+//const char *ssid = "Ale";
+//const char *password = "Alejandra22";
+
 
 void startCameraServer();
 void setupLedFlash(int pin);
