@@ -1,6 +1,6 @@
 """
 ===============================================================================
-Proyecto: Espectrofotómetro Digital Para Uso Didáctico
+Proyecto: Espectrofotómetro Digital En Tiempo Real Para Uso Didáctico
 Autores: 
 Luis Octavio Pimienta Murillo
 Alejandra Ochoa Gutiérrez
@@ -21,140 +21,194 @@ Librerías:
 - Matplotlib: Visualización de gráficos en tiempo real.
 
 Instrucciones:
-1. Configura la dirección IP del ESP32-CAM en la variable `url` (se debería de ver en el monitor serial tras cargar el código en Arduino y reiniciar el ESP32-CAM).
+1. Configura la dirección IP del ESP32-CAM en la variable `url`.
 2. Asegúrate de que las librerías están instaladas.
-3. Ingresa a la dirección IP proporcionada por el ESP32-CAM en Arduino:
-   - Quita el filtro "Auto" en la sección "WB Mode", seleccionando una opción como "Home" u "Office" (fueron las que mejores resultados nos dieron).
-   - Ajusta la resolución del stream según sea necesario para visualizar correctamente el stream en la GUI. 
+3. Ajusta la configuración de la cámara y resolución según las instrucciones.
 4. Ejecuta el programa y utiliza los botones de la interfaz para interactuar 
    con el stream y analizar los datos en tiempo real.
-
-Nota: Dependiendo de la resolución seleccionada y las características del monitor, 
-la interfaz gráfica puede variar ligeramente en su presentación. Esto afecta 
-principalmente las siguientes funciones del código:
-   - `update_frame()`: Captura y ajusta los frames del stream. La calidad y el tamaño del frame dependerán de la resolución configurada en la IP del ESP32-CAM.
-   - `Label` en la función principal: El área donde se muestra el video está configurada con un tamaño fijo (640x480 píxeles) en la GUI. Esto puede ser modificado para adaptarse a resoluciones más altas o bajas.
 ===============================================================================
 """
 
 import cv2
-from tkinter import Tk, Button, Label, Frame, Canvas, Toplevel, ttk
+from tkinter import Tk, Button, Label, Frame, Toplevel, ttk, messagebox
 from PIL import Image, ImageTk
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-import matplotlib.colors as mcolors
 import os
-from datetime import datetime  # Para generar nombres únicos de capturas
+from datetime import datetime
+import socket
+from tkinter import Canvas
 
 # Dirección del ESP32-CAM
 url = "http://192.168.100.13:81/stream"
 
 # Variables globales
-cap = None  # Objeto para capturar el stream
-streaming = False  # Estado del stream
-imagen_capturada = None  # Último frame capturado
-task_intensidad = None  # Tarea de actualización del gráfico de intensidad
-task_histograma = None  # Tarea de actualización del histograma
+cap = None
+streaming = False
+imagen_capturada = None
+recorte_activo = None
+resolucion_original = None
+task_histograma = None
+task_intensidad = None
 
 # =============================================================================
-# Funciones para la gestión del stream
+# Funciones para verificar conexión
+# =============================================================================
+
+def check_connection(host, port, timeout=2):
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except Exception:
+        return False
+
+# =============================================================================
+# Funciones de gestión del stream
 # =============================================================================
 
 def start_stream():
-    """
-    Inicia o reanuda el stream desde el ESP32-CAM.
-    Activa el botón para el análisis en tiempo real.
-    """
-    global cap, streaming
+    global cap, streaming, resolucion_original
     if not streaming:
-        cap = cv2.VideoCapture(url)
-        streaming = True
-        boton_analisis.config(state="normal")  # Habilitar el análisis
-        update_frame()
-        print("Stream iniciado.")
+        try:
+            host, port = url.split("//")[1].split(":")[0], int(url.split(":")[-1].split("/")[0])
+            if not check_connection(host, port):
+                raise ConnectionError("No hay conexión con el ESP32-CAM. Verifique el dispositivo y la red.")
+            
+            cap = cv2.VideoCapture(url)
+            if not cap.isOpened():
+                raise ConnectionError("No se pudo abrir el stream del ESP32-CAM. Intente nuevamente.")
+            
+            streaming = True
+            boton_recorte.config(state="disabled", text="Detenga el Stream para Recortar")
+            boton_resolucion.config(state="normal")
+            boton_analisis.config(state="normal")
+            update_frame()
+            print("Stream iniciado.")
+            
+            if resolucion_original is None:
+                _, frame = cap.read()
+                if frame is not None:
+                    resolucion_original = (frame.shape[1], frame.shape[0])
 
-def update_frame():
-    """
-    Actualiza el frame capturado desde el ESP32-CAM en la ventana de Tkinter.
-    Convierte el frame de formato BGR a RGB para su visualización.
-    """
-    global cap, streaming, imagen_capturada
-    if streaming and cap is not None:
-        ret, frame = cap.read()
-        if ret:
-            # Conversión de BGR a RGB
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            img = Image.fromarray(frame)
-            imgtk = ImageTk.PhotoImage(image=img)
-
-            # Guardar el último frame capturado
-            imagen_capturada = img
-
-            # Actualizar el frame en el Label de video
-            video_label.imgtk = imgtk
-            video_label.configure(image=imgtk)
-
-        # Llamar a esta función nuevamente después de 10 ms
-        root.after(10, update_frame)
+        except ConnectionError as ce:
+            messagebox.showerror("Error de Conexión", str(ce))
+            print(f"Error de conexión: {ce}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Error inesperado: {e}")
+            print(f"Error inesperado: {e}")
 
 def stop_stream():
-    """
-    Detiene el stream desde el ESP32-CAM.
-    Libera los recursos asociados con la captura de video.
-    """
     global cap, streaming
     if streaming:
         streaming = False
         if cap is not None:
             cap.release()
-        boton_analisis.config(state="disabled")  # Deshabilitar análisis
+        boton_recorte.config(state="normal", text="Recortar Stream")
+        boton_analisis.config(state="disabled")
         print("Stream detenido.")
 
+def update_frame():
+    global cap, streaming, imagen_capturada, recorte_activo
+    if streaming and cap is not None:
+        ret, frame = cap.read()
+        if ret:
+            if recorte_activo:
+                x0, y0, x1, y1 = recorte_activo
+                frame = frame[y0:y1, x0:x1]
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            img = Image.fromarray(frame)
+            imgtk = ImageTk.PhotoImage(image=img)
+            video_label.imgtk = imgtk
+            video_label.configure(image=imgtk)
+            imagen_capturada = img
+        root.after(10, update_frame)
+
+def reset_resolution():
+    global recorte_activo
+    recorte_activo = None
+    print("Resolución original restaurada.")
+
 # =============================================================================
-# Funciones para el análisis de imágenes
+# Funciones de recorte
+# =============================================================================
+
+def iniciar_recorte():
+    if imagen_capturada:
+        global rectangulo, x_inicial, y_inicial, recorte_activo
+
+        original_width, original_height = imagen_capturada.width, imagen_capturada.height
+
+        def iniciar_seleccion(event):
+            global x_inicial, y_inicial, rectangulo
+            x_inicial, y_inicial = event.x, event.y
+            rectangulo = canvas.create_rectangle(x_inicial, y_inicial, x_inicial, y_inicial, outline="red", width=2)
+
+        def actualizar_seleccion(event):
+            canvas.coords(rectangulo, x_inicial, y_inicial, event.x, event.y)
+
+        def finalizar_seleccion(event):
+            global recorte_activo
+            x_final, y_final = event.x, event.y
+            canvas_width, canvas_height = canvas.winfo_width(), canvas.winfo_height()
+
+            x0, x1 = sorted([x_inicial, x_final])
+            y0, y1 = sorted([y_inicial, y_final])
+
+            scaled_x0 = int(x0 * original_width / canvas_width)
+            scaled_x1 = int(x1 * original_width / canvas_width)
+            scaled_y0 = int(y0 * original_height / canvas_height)
+            scaled_y1 = int(y1 * original_height / canvas_height)
+
+            recorte_activo = (scaled_x0, scaled_y0, scaled_x1, scaled_y1)
+            print(f"Área de recorte seleccionada (escalada): {recorte_activo}")
+            ventana_recorte.destroy()
+
+        ventana_recorte = Toplevel(root)
+        ventana_recorte.title("Seleccionar Área de Recorte")
+        ventana_recorte.geometry(f"{original_width}x{original_height}")
+
+        canvas = Canvas(ventana_recorte, width=original_width, height=original_height)
+        canvas.pack(fill="both", expand=True)
+        imgtk = ImageTk.PhotoImage(image=imagen_capturada)
+        canvas.image = imgtk
+        canvas.create_image(0, 0, anchor="nw", image=imgtk)
+
+        canvas.bind("<Button-1>", iniciar_seleccion)
+        canvas.bind("<B1-Motion>", actualizar_seleccion)
+        canvas.bind("<ButtonRelease-1>", finalizar_seleccion)
+
+        rectangulo = None
+
+# =============================================================================
+# Funciones de análisis
 # =============================================================================
 
 def abrir_ventanas():
-    """
-    Abre una ventana con dos pestañas para mostrar el histograma y el gráfico 
-    de intensidad en tiempo real.
-    Incluye la funcionalidad para guardar las gráficas como imágenes en una 
-    carpeta llamada 'Capturas'.
-    """
     if not streaming:
         print("El stream debe estar iniciado para acceder a esta funcionalidad.")
         return
 
-    # Crear ventana con pestañas
     ventana_tabs = Toplevel(root)
     ventana_tabs.title("Análisis en Tiempo Real")
     ventana_tabs.geometry("800x600")
     tabs = ttk.Notebook(ventana_tabs)
 
-    # Pestañas
     tab_histograma = ttk.Frame(tabs)
     tab_intensidad = ttk.Frame(tabs)
     tabs.add(tab_histograma, text="Histograma")
     tabs.add(tab_intensidad, text="Graficar Intensidad")
     tabs.pack(expand=1, fill="both")
 
-    # Crear gráficos con Matplotlib
     fig_histograma, ax_histograma = plt.subplots(figsize=(7, 5))
     fig_intensidad, ax_intensidad = plt.subplots(figsize=(7, 5))
 
-    # Canvas para incrustar gráficos
     canvas_histograma = FigureCanvasTkAgg(fig_histograma, master=tab_histograma)
     canvas_histograma.get_tk_widget().pack(fill="both", expand=True)
     canvas_intensidad = FigureCanvasTkAgg(fig_intensidad, master=tab_intensidad)
     canvas_intensidad.get_tk_widget().pack(fill="both", expand=True)
 
-    # Funciones internas de actualización
     def actualizar_histograma():
-        """
-        Actualiza el histograma promedio de los canales de color (RGB) en 
-        tiempo real.
-        """
         global task_histograma
         if streaming and imagen_capturada:
             ax_histograma.clear()
@@ -165,109 +219,84 @@ def abrir_ventanas():
             intensity_values = (r_values + g_values + b_values) / 3
             x = np.arange(rgb_array.shape[1])
 
-            # Dibujar líneas de color
             ax_histograma.plot(x, r_values, color='red', label='Rojo')
             ax_histograma.plot(x, g_values, color='green', label='Verde')
             ax_histograma.plot(x, b_values, color='blue', label='Azul')
             ax_histograma.plot(x, intensity_values, color='black', label='Intensidad')
 
-            # Configurar la gráfica
             ax_histograma.set_title("Histograma Promedio")
             ax_histograma.set_xlabel("Posición X del Stream")
             ax_histograma.set_ylabel("Valor Promedio")
             ax_histograma.legend()
             ax_histograma.grid(True)
 
-            # Dibujar en el canvas
             canvas_histograma.draw()
 
-        # Programar la siguiente actualización
         task_histograma = root.after(100, actualizar_histograma)
 
     def actualizar_intensidad():
-        """
-        Actualiza la gráfica de intensidad en escala de grises en tiempo real.
-        La línea es completamente negra.
-        """
         global task_intensidad
         if streaming and imagen_capturada:
             ax_intensidad.clear()
-            gray_image = imagen_capturada.convert('L')  # Convertir a escala de grises
-            gray_array = np.array(gray_image)  # Convertir a matriz NumPy
-            intensity_profile = np.mean(gray_array, axis=0)  # Perfil de intensidad promedio
-            x = np.arange(len(intensity_profile))  # Coordenadas X
+            gray_image = imagen_capturada.convert('L')
+            gray_array = np.array(gray_image)
+            intensity_profile = np.mean(gray_array, axis=0)
+            x = np.arange(len(intensity_profile))
 
-            # Dibujar la línea en negro
             ax_intensidad.plot(x, intensity_profile, color='black', label='Intensidad')
 
-            # Configurar la gráfica
             ax_intensidad.set_title("Perfil de Intensidad")
             ax_intensidad.set_xlabel("Posición X del Stream")
             ax_intensidad.set_ylabel("Intensidad")
             ax_intensidad.legend()
             ax_intensidad.grid(True)
 
-            # Dibujar en el canvas
             canvas_intensidad.draw()
 
-        # Programar la siguiente actualización
         task_intensidad = root.after(100, actualizar_intensidad)
 
-
-
-    # Función para guardar las gráficas
-    def guardar_graficas():
-        """
-        Guarda las gráficas del histograma y de intensidad como imágenes PNG
-        en la carpeta 'Capturas'. Si la carpeta no existe, se crea.
-        """
-        # Crear carpeta si no existe
-        carpeta_capturas = "Capturas"
-        if not os.path.exists(carpeta_capturas):
-            os.makedirs(carpeta_capturas)
-            print(f"Carpeta '{carpeta_capturas}' creada.")
-
-        # Generar nombres únicos para las gráficas
-        hora_actual = datetime.now().strftime("%H-%M-%S")
-        archivo_histograma = os.path.join(carpeta_capturas, f"Captura_Histograma_{hora_actual}.png")
-        archivo_intensidad = os.path.join(carpeta_capturas, f"Captura_Intensidad_{hora_actual}.png")
-
-        # Guardar las gráficas en la carpeta
-        fig_histograma.savefig(archivo_histograma)
-        fig_intensidad.savefig(archivo_intensidad)
-        print(f"Gráficas guardadas como '{archivo_histograma}' y '{archivo_intensidad}'.")
-
-    # Cancelar tareas al cerrar la ventana
     def on_close():
         global task_histograma, task_intensidad
         if task_histograma:
             root.after_cancel(task_histograma)
+            task_histograma = None
         if task_intensidad:
             root.after_cancel(task_intensidad)
+            task_intensidad = None
         ventana_tabs.destroy()
 
     ventana_tabs.protocol("WM_DELETE_WINDOW", on_close)
-
-    # Botón para guardar las gráficas
-    boton_guardar = Button(ventana_tabs, text="Guardar Gráficas", command=guardar_graficas)
-    boton_guardar.pack(side="bottom", pady=10)
-
-    # Iniciar tareas de actualización
     actualizar_histograma()
     actualizar_intensidad()
 
 # =============================================================================
-# Cierre del programa al cerrar la GUI principal
+# Cierre del programa
 # =============================================================================
 
 def cerrar_programa():
-    """
-    Cierra el programa correctamente al cerrar la ventana principal.
-    Detiene el stream si está activo y destruye la ventana.
-    """
-    stop_stream()
+    global cap, task_histograma, task_intensidad
+    if task_histograma:
+        root.after_cancel(task_histograma)
+    if task_intensidad:
+        root.after_cancel(task_intensidad)
+    if streaming:
+        stop_stream()
     root.destroy()
-    print("Programa finalizado.")
+    print("Programa cerrado correctamente.")
+
+# =============================================================================
+# Cargar portada
+# =============================================================================
+
+def cargar_portada():
+    try:
+        portada = Image.open("templates/portada_Fotónica.png")
+        portada.thumbnail((300, 100))  # Ajusta el tamaño
+        portada_tk = ImageTk.PhotoImage(portada)
+        label_portada.config(image=portada_tk)
+        label_portada.image = portada_tk
+    except Exception as e:
+        print(f"Error al cargar la portada: {e}")
 
 # =============================================================================
 # Interfaz gráfica principal
@@ -276,21 +305,32 @@ def cerrar_programa():
 root = Tk()
 root.title("Stream ESP32-CAM y Procesamiento de Imágenes")
 root.geometry("1000x600")
-root.protocol("WM_DELETE_WINDOW", cerrar_programa)  # Cerrar programa al cerrar la GUI
+root.protocol("WM_DELETE_WINDOW", cerrar_programa)
 
-# Botones
+# Agregar la imagen de portada
+label_portada = Label(root, bg="white")
+label_portada.pack(pady=10)  # Espaciado para separar de los botones
+cargar_portada()
+
 frame_botones = Frame(root)
 frame_botones.pack(side="left", padx=10, pady=10)
+
 boton_iniciar = Button(frame_botones, text="Iniciar Stream", command=start_stream)
 boton_iniciar.pack(pady=5)
+
 boton_detener = Button(frame_botones, text="Detener Stream", command=stop_stream)
 boton_detener.pack(pady=5)
+
+boton_recorte = Button(frame_botones, text="Recortar Stream", command=iniciar_recorte, state="disabled")
+boton_recorte.pack(pady=5)
+
+boton_resolucion = Button(frame_botones, text="Resolución Original", command=reset_resolution, state="disabled")
+boton_resolucion.pack(pady=5)
+
 boton_analisis = Button(frame_botones, text="Análisis en Tiempo Real", command=abrir_ventanas, state="disabled")
 boton_analisis.pack(pady=5)
 
-# Label para el video
 video_label = Label(root, width=640, height=480, bg="black")
 video_label.pack(side="right", padx=10, pady=10)
 
-# Ejecutar la interfaz
 root.mainloop()
